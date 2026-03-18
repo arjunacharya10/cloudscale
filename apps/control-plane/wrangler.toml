@@ -1,0 +1,16 @@
+name = "cloudscale-control-plane"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "cloudscale"
+database_name = "cloudscale"
+database_id = "5f35db9f-c0fe-4691-bfbe-004028c0bba7"
+
+[[durable_objects.bindings]]
+name = "TOPOLOGY_HUB"
+class_name = "TopologyHub"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TopologyHub"]

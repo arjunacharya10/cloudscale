@@ -1,0 +1,7 @@
+{
+  "name": "cloudscale",
+  "private": true,
+  "workspaces": [
+    "apps/control-plane"
+  ]
+}

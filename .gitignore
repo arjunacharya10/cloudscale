@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Wrangler
+.wrangler/
+.dev.vars
+
+# Go
+apps/client/bin/
+
+# OS
+.DS_Store
