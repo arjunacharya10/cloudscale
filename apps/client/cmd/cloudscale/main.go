@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -102,10 +105,174 @@ func main() {
 		Use:   "cloudscale",
 		Short: "Cloudscale mesh VPN client",
 	}
-	root.AddCommand(upCmd(), downCmd(), statusCmd())
+	root.AddCommand(setupCmd(), upCmd(), downCmd(), statusCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// cloudscale setup — interactive config wizard + optional service installation.
+func setupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "setup",
+		Short: "Configure cloudscale interactively",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reader := bufio.NewReader(os.Stdin)
+
+			prompt := func(label, fallback string) string {
+				if fallback != "" {
+					fmt.Printf("%s [%s]: ", label, fallback)
+				} else {
+					fmt.Printf("%s: ", label)
+				}
+				val, _ := reader.ReadString('\n')
+				val = strings.TrimSpace(val)
+				if val == "" {
+					return fallback
+				}
+				return val
+			}
+
+			fmt.Println("Cloudscale setup")
+			fmt.Println("----------------")
+
+			controlURL := prompt("Control plane URL (e.g. https://cloudscale.example.workers.dev)", "")
+			if controlURL == "" {
+				return fmt.Errorf("controlURL is required")
+			}
+
+			networkKey := prompt("Network key (shared secret)", "")
+			if networkKey == "" {
+				return fmt.Errorf("networkKey is required")
+			}
+
+			hostname, _ := os.Hostname()
+			nodeName := prompt("Node name", hostname)
+			if nodeName == "" {
+				return fmt.Errorf("nodeName is required")
+			}
+
+			userID := prompt("User ID", nodeName)
+
+			cfg := Config{
+				ControlURL: controlURL,
+				NetworkKey: networkKey,
+				NodeName:   nodeName,
+				UserID:     userID,
+			}
+
+			path := configPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				return fmt.Errorf("create config dir: %w", err)
+			}
+			data, err := json.MarshalIndent(cfg, "", "  ")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				return fmt.Errorf("write config: %w", err)
+			}
+			fmt.Printf("\nConfig written to %s\n", path)
+
+			// Optional service installation.
+			fmt.Printf("\nInstall cloudscale as a system service? [y/N]: ")
+			answer, _ := reader.ReadString('\n')
+			if strings.ToLower(strings.TrimSpace(answer)) == "y" {
+				exe, err := os.Executable()
+				if err != nil {
+					return fmt.Errorf("locate executable: %w", err)
+				}
+				if err := installService(exe); err != nil {
+					return fmt.Errorf("install service: %w", err)
+				}
+			} else {
+				fmt.Println("\nRun manually:")
+				fmt.Println("  sudo cloudscale up")
+			}
+
+			return nil
+		},
+	}
+}
+
+// installService writes a systemd unit (Linux) or launchd plist (macOS).
+func installService(exePath string) error {
+	switch runtime.GOOS {
+	case "linux":
+		return installSystemd(exePath)
+	case "darwin":
+		return installLaunchd(exePath)
+	default:
+		return fmt.Errorf("service installation not supported on %s", runtime.GOOS)
+	}
+}
+
+func installSystemd(exePath string) error {
+	unit := fmt.Sprintf(`[Unit]
+Description=Cloudscale mesh VPN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%s up
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+`, exePath)
+
+	const path = "/etc/systemd/system/cloudscale.service"
+	if err := os.WriteFile(path, []byte(unit), 0644); err != nil {
+		return fmt.Errorf("write unit file (run setup as root): %w", err)
+	}
+	fmt.Printf("Systemd unit written to %s\n\n", path)
+	fmt.Println("Enable and start:")
+	fmt.Println("  sudo systemctl daemon-reload")
+	fmt.Println("  sudo systemctl enable --now cloudscale")
+	fmt.Println("\nView logs:")
+	fmt.Println("  sudo journalctl -u cloudscale -f")
+	return nil
+}
+
+func installLaunchd(exePath string) error {
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cloudscale</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>%s</string>
+        <string>up</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/cloudscale.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/cloudscale.log</string>
+</dict>
+</plist>
+`, exePath)
+
+	const path = "/Library/LaunchDaemons/com.cloudscale.plist"
+	if err := os.WriteFile(path, []byte(plist), 0644); err != nil {
+		return fmt.Errorf("write plist (run setup as root): %w", err)
+	}
+	fmt.Printf("LaunchDaemon plist written to %s\n\n", path)
+	fmt.Println("Enable and start:")
+	fmt.Println("  sudo launchctl load /Library/LaunchDaemons/com.cloudscale.plist")
+	fmt.Println("\nStop:")
+	fmt.Println("  sudo launchctl unload /Library/LaunchDaemons/com.cloudscale.plist")
+	fmt.Println("\nView logs:")
+	fmt.Println("  tail -f /var/log/cloudscale.log")
+	return nil
 }
 
 // cloudscale up — register (or reuse existing registration), bring up WireGuard, run daemon.
@@ -183,32 +350,59 @@ func downCmd() *cobra.Command {
 		Use:   "down",
 		Short: "Disconnect from the mesh and deregister this node",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-			state, err := loadState()
-			if err != nil {
-				return fmt.Errorf("not connected (no state file): %w", err)
-			}
-
-			cc := controlclient.New(controlclient.Config{
-				ControlURL: cfg.ControlURL,
-				NetworkKey: cfg.NetworkKey,
-			})
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			if err := cc.Deregister(ctx, state.NodeID); err != nil {
-				fmt.Fprintf(os.Stderr, "warn: deregister: %v\n", err)
+			// Deregister from control plane if we have state.
+			state, stateErr := loadState()
+			if stateErr == nil {
+				cfg, err := loadConfig()
+				if err == nil {
+					cc := controlclient.New(controlclient.Config{
+						ControlURL: cfg.ControlURL,
+						NetworkKey: cfg.NetworkKey,
+					})
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if err := cc.Deregister(ctx, state.NodeID); err != nil {
+						fmt.Fprintf(os.Stderr, "warn: deregister: %v\n", err)
+					} else {
+						fmt.Println("deregistered from control plane")
+					}
+					cancel()
+				}
 			}
 
-			wireguard.TeardownInterface(state.IfName) //nolint:errcheck
+			// Tear down the WireGuard interface.
+			// Fall back to the default interface name if state is missing or IfName is empty.
+			ifName := wireguard.InterfaceName
+			if stateErr == nil && state.IfName != "" {
+				ifName = state.IfName
+			}
+			if err := wireguard.TeardownInterface(ifName); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: teardown interface: %v\n", err)
+			} else {
+				fmt.Printf("interface %s removed\n", ifName)
+			}
+
+			// On macOS, clean up any leftover wireguard-go socket files.
+			if runtime.GOOS == "darwin" {
+				cleanupWireguardSockets()
+			}
+
 			removeState()
 			fmt.Println("cloudscale down")
 			return nil
 		},
+	}
+}
+
+// cleanupWireguardSockets removes stale wireguard-go socket files on macOS.
+func cleanupWireguardSockets() {
+	entries, err := os.ReadDir("/var/run/wireguard")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sock") {
+			os.Remove("/var/run/wireguard/" + e.Name()) //nolint:errcheck
+		}
 	}
 }
 

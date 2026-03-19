@@ -1,3 +1,4 @@
-cloudscale
-cloudscale-pi
-cloudscale-*
+# compiled binaries (files only, not directories)
+/cloudscale
+/cloudscale-pi
+/cloudscale-*
