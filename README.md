@@ -79,7 +79,15 @@ GOOS=linux GOARCH=arm GOARM=7 go build -o cloudscale-pi ./cmd/cloudscale
 
 ## Client setup
 
-Create `~/.config/cloudscale/config.json` on each node:
+Run the interactive setup wizard on each node:
+
+```bash
+sudo cloudscale setup
+```
+
+This will prompt for your control plane URL, network key, and node name, then write `~/.config/cloudscale/config.json`. It will also offer to install cloudscale as a system service (systemd on Linux, launchd on macOS) so it starts automatically on boot.
+
+If you prefer to write the config manually:
 
 ```json
 {
@@ -95,13 +103,18 @@ All nodes on the same network share the same `controlURL` and `networkKey`. `nod
 ## Usage
 
 ```bash
+# First time: configure this node
+sudo cloudscale setup
+
 # Connect (requires root — manages WireGuard interface)
+# Blocks in the foreground; use a service manager or screen/tmux for background use
 sudo cloudscale up
 
-# Show mesh status
+# Show mesh status and connected peers
 cloudscale status
 
-# Disconnect and deregister
+# Gracefully disconnect and deregister
+# Sends SIGTERM to the running cloudscale up process, then cleans up
 sudo cloudscale down
 ```
 
@@ -110,6 +123,35 @@ sudo cloudscale down
 2. Generate a WireGuard keypair and bring up the interface
 3. Discover public/LAN endpoints via Cloudflare STUN
 4. Start a heartbeat loop (every 30s) and a WebSocket listener for live updates
+5. Write a PID file so `cloudscale down` can find and stop it cleanly
+
+`cloudscale down` will:
+1. Send SIGTERM to the running `cloudscale up` process and wait for it to exit
+2. Deregister the node from the control plane
+3. Remove the WireGuard interface and route
+4. Clean up any leftover socket files
+5. Delete local state
+
+> **Ctrl+C vs `cloudscale down`:** Ctrl+C in the `cloudscale up` terminal disconnects immediately but does not deregister — the node stays in the control plane until its heartbeat times out (~2 min). Use `cloudscale down` for a clean exit that frees the mesh IP immediately.
+
+## Running as a service
+
+`cloudscale setup` can install the service for you. To do it manually:
+
+**Linux (systemd)**
+```bash
+sudo cloudscale setup   # choose yes when asked about service installation
+sudo systemctl daemon-reload
+sudo systemctl enable --now cloudscale
+sudo journalctl -u cloudscale -f   # view logs
+```
+
+**macOS (launchd)**
+```bash
+sudo cloudscale setup   # choose yes when asked about service installation
+sudo launchctl load /Library/LaunchDaemons/com.cloudscale.plist
+tail -f /var/log/cloudscale.log   # view logs
+```
 
 ## API reference
 
