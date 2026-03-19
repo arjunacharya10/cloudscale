@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	InterfaceName = "cloudscale0"
-	ListenPort    = 51820
+	InterfaceName      = "cloudscale0" // used on Linux
+	darwinSocketName   = "utun"        // wireguard-go socket name on macOS
+	ListenPort         = 51820
 )
 
 // PeerConfig holds the WireGuard-level config for one peer.
@@ -38,13 +39,14 @@ type Manager struct {
 	ifName string
 }
 
-// New opens a wgctrl client. The caller must call Close when done.
-func New() (*Manager, error) {
+// New opens a wgctrl client for the given interface name.
+// Pass the value returned by EnsureInterface.
+func New(ifName string) (*Manager, error) {
 	c, err := wgctrl.New()
 	if err != nil {
 		return nil, fmt.Errorf("wgctrl: %w", err)
 	}
-	return &Manager{client: c, ifName: InterfaceName}, nil
+	return &Manager{client: c, ifName: ifName}, nil
 }
 
 // Close releases the wgctrl client.
@@ -70,31 +72,34 @@ func PublicKeyFromPrivate(privateKeyStr string) (string, error) {
 	return key.PublicKey().String(), nil
 }
 
-// EnsureInterface creates the WireGuard interface and assigns meshIP if it
-// does not already exist. meshIP should be in CIDR notation, e.g. "100.64.0.1/10".
-// This is a best-effort call — if the interface already exists, the error is ignored.
-func EnsureInterface(meshIP string) error {
+// EnsureInterface creates the WireGuard interface, assigns meshIP, and adds
+// the mesh route. Returns the actual OS interface name to pass to New().
+// meshIP should be in CIDR notation, e.g. "100.64.0.1/10".
+func EnsureInterface(meshIP string) (string, error) {
 	switch runtime.GOOS {
 	case "linux":
-		return ensureLinux(meshIP)
+		return InterfaceName, ensureLinux(meshIP)
 	case "darwin":
 		return ensureDarwin(meshIP)
 	default:
-		return fmt.Errorf("unsupported OS: %s — create interface %q manually", runtime.GOOS, InterfaceName)
+		return "", fmt.Errorf("unsupported OS: %s — create interface %q manually", runtime.GOOS, InterfaceName)
 	}
 }
 
 // TeardownInterface brings down and removes the WireGuard interface.
-func TeardownInterface() error {
+// Pass the ifName returned by EnsureInterface.
+func TeardownInterface(ifName string) error {
 	switch runtime.GOOS {
 	case "linux":
-		run("ip", "route", "del", meshCIDR, "dev", InterfaceName) //nolint:errcheck
-		return run("ip", "link", "delete", InterfaceName)
+		run("ip", "route", "del", meshCIDR, "dev", ifName) //nolint:errcheck
+		return run("ip", "link", "delete", ifName)
 	case "darwin":
 		run("route", "delete", "-net", meshCIDR) //nolint:errcheck
-		return run("wireguard-go", "--terminate", InterfaceName)
+		sockPath := fmt.Sprintf("/var/run/wireguard/%s.sock", ifName)
+		os.Remove(sockPath)                      //nolint:errcheck
+		return run("pkill", "-f", "wireguard-go")
 	default:
-		return fmt.Errorf("unsupported OS: %s — remove interface %q manually", runtime.GOOS, InterfaceName)
+		return fmt.Errorf("unsupported OS: %s — remove interface %q manually", runtime.GOOS, ifName)
 	}
 }
 
@@ -173,40 +178,72 @@ func ensureLinux(meshIP string) error {
 	return run("ip", "route", "add", meshCIDR, "dev", InterfaceName, "proto", "static")
 }
 
-func ensureDarwin(meshIP string) error {
-	// wireguard-go starts a userspace WireGuard daemon and creates a utun interface.
-	// wgctrl talks to it via /var/run/wireguard/<InterfaceName>.sock.
-	run("wireguard-go", InterfaceName) //nolint:errcheck
+func ensureDarwin(meshIP string) (string, error) {
+	// Snapshot existing utun interfaces so we can detect the new one.
+	before := utunInterfaces()
 
-	// The actual utun interface name (e.g. "utun5") is written to
-	// /var/run/wireguard/<InterfaceName>.name once the daemon is ready.
-	utun, err := darwinUtunName()
+	// wireguard-go picks the next free utunN and creates a socket at
+	// /var/run/wireguard/<utunN>.sock — wgctrl uses the utunN name directly.
+	if err := run("wireguard-go", darwinSocketName); err != nil {
+		return "", fmt.Errorf("wireguard-go: %w (is wireguard-go installed and in PATH?)", err)
+	}
+
+	// Wait for the new utunN interface to appear.
+	utun, err := darwinNewUtun(before)
 	if err != nil {
-		return fmt.Errorf("waiting for wireguard-go: %w", err)
+		return "", fmt.Errorf("waiting for wireguard-go interface: %w", err)
 	}
 
-	run("ifconfig", utun, "inet", meshIP, meshIP) //nolint:errcheck
-	if err := run("ifconfig", utun, "up"); err != nil {
-		return err
+	// Wait for the wgctrl socket (<utunN>.sock) to be ready.
+	sockPath := fmt.Sprintf("/var/run/wireguard/%s.sock", utun)
+	for range 20 {
+		if _, err := os.Stat(sockPath); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	run("route", "delete", "-net", meshCIDR)                                    //nolint:errcheck
-	return run("route", "add", "-net", meshCIDR, "-interface", utun)
+
+	// Configure the interface address. macOS utun interfaces are point-to-point;
+	// set the address and peer-address both to the mesh IP with explicit /32 netmask.
+	ip, _, err := net.ParseCIDR(meshIP)
+	if err != nil {
+		return "", fmt.Errorf("parse mesh IP %q: %w", meshIP, err)
+	}
+	run("ifconfig", utun, "inet", ip.String(), ip.String(), "netmask", "255.255.255.255") //nolint:errcheck
+	if err := run("ifconfig", utun, "up"); err != nil {
+		return "", err
+	}
+	run("route", "delete", "-net", meshCIDR)                                 //nolint:errcheck
+	if err := run("route", "add", "-net", meshCIDR, "-interface", utun); err != nil {
+		return "", err
+	}
+
+	return utun, nil
 }
 
-// darwinUtunName reads the actual utun interface name that wireguard-go
-// assigned, retrying briefly while the daemon starts up.
-func darwinUtunName() (string, error) {
-	namePath := fmt.Sprintf("/var/run/wireguard/%s.name", InterfaceName)
+// utunInterfaces returns the set of utunN interface names currently present.
+func utunInterfaces() map[string]bool {
+	ifaces, _ := net.Interfaces()
+	names := make(map[string]bool, len(ifaces))
+	for _, iface := range ifaces {
+		if strings.HasPrefix(iface.Name, "utun") {
+			names[iface.Name] = true
+		}
+	}
+	return names
+}
+
+// darwinNewUtun polls until a utunN interface appears that wasn't in before.
+func darwinNewUtun(before map[string]bool) (string, error) {
 	for range 20 {
-		data, err := os.ReadFile(namePath)
-		if err == nil {
-			if name := strings.TrimSpace(string(data)); name != "" {
+		for name := range utunInterfaces() {
+			if !before[name] {
 				return name, nil
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return "", fmt.Errorf("timed out waiting for %s", namePath)
+	return "", fmt.Errorf("no new utun interface appeared after 2s")
 }
 
 func run(name string, args ...string) error {

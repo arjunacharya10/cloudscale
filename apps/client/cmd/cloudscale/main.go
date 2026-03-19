@@ -31,20 +31,27 @@ type Config struct {
 // State persists the registered nodeID, mesh IP, and WireGuard keypair
 // to ~/.local/share/cloudscale/state.json.
 type State struct {
-	NodeID     string `json:"nodeId"`
-	MeshIP     string `json:"meshIp"`
+	NodeID    string `json:"nodeId"`
+	MeshIP    string `json:"meshIp"`
 	PrivateKey string `json:"privateKey"`
 	PublicKey  string `json:"publicKey"`
+	IfName    string `json:"ifName,omitempty"` // actual OS interface name (e.g. utun7 on macOS)
+}
+
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/tmp" // fallback so paths are at least valid
+	}
+	return home
 }
 
 func configPath() string {
-	base, _ := os.UserConfigDir()
-	return filepath.Join(base, "cloudscale", "config.json")
+	return filepath.Join(homeDir(), ".config", "cloudscale", "config.json")
 }
 
 func statePath() string {
-	base, _ := os.UserHomeDir()
-	return filepath.Join(base, ".local", "share", "cloudscale", "state.json")
+	return filepath.Join(homeDir(), ".local", "share", "cloudscale", "state.json")
 }
 
 func loadConfig() (*Config, error) {
@@ -124,11 +131,14 @@ func upCmd() *cobra.Command {
 			}
 
 			// Bring up WireGuard interface and add mesh route.
-			if err := wireguard.EnsureInterface(state.MeshIP + "/10"); err != nil {
+			ifName, err := wireguard.EnsureInterface(state.MeshIP + "/10")
+			if err != nil {
 				return fmt.Errorf("bring up interface: %w", err)
 			}
+			state.IfName = ifName
+			saveState(state) //nolint:errcheck
 
-			wg, err := wireguard.New()
+			wg, err := wireguard.New(ifName)
 			if err != nil {
 				return fmt.Errorf("wgctrl: %w", err)
 			}
@@ -152,10 +162,9 @@ func upCmd() *cobra.Command {
 			// Send an initial heartbeat immediately so our endpoints are registered
 			// before other nodes try to reach us.
 			eps := endpoint.Discover(wireguard.ListenPort)
-			if hbCtx, cancel := context.WithTimeout(ctx, 10*time.Second); true {
-				cc.Heartbeat(hbCtx, state.NodeID, eps) //nolint:errcheck
-				cancel()
-			}
+			hbCtx, hbCancel := context.WithTimeout(ctx, 10*time.Second)
+			cc.Heartbeat(hbCtx, state.NodeID, eps) //nolint:errcheck
+			hbCancel()
 
 			// Run heartbeat + WebSocket in the background.
 			go runHeartbeat(ctx, cc, state.NodeID)
@@ -195,7 +204,7 @@ func downCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "warn: deregister: %v\n", err)
 			}
 
-			wireguard.TeardownInterface() //nolint:errcheck
+			wireguard.TeardownInterface(state.IfName) //nolint:errcheck
 			removeState()
 			fmt.Println("cloudscale down")
 			return nil
