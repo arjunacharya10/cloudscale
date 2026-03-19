@@ -38,4 +38,5 @@ export interface NetMap {
 export interface Env {
   cloudscale: D1Database;
   TOPOLOGY_HUB: DurableObjectNamespace;
+  NETWORK_KEY: string;
 }

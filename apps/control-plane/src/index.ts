@@ -6,8 +6,20 @@ import { handleTopologyWS, TopologyHub } from "./topology";
 
 export { TopologyHub };
 
+function requireAuth(req: Request, env: Env): Response | null {
+  if (!env.NETWORK_KEY) return null; // no key configured — allow all (useful in dev)
+  const auth = req.headers.get("Authorization");
+  if (!auth || auth !== `Bearer ${env.NETWORK_KEY}`) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  return null;
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    const authErr = requireAuth(req, env);
+    if (authErr) return authErr;
+
     const url = new URL(req.url);
     const { pathname } = url;
 
