@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -58,21 +57,6 @@ func statePath() string {
 	return filepath.Join(homeDir(), ".local", "share", "cloudscale", "state.json")
 }
 
-func pidPath() string {
-	return filepath.Join(homeDir(), ".local", "share", "cloudscale", "cloudscale.pid")
-}
-
-func writePID() error {
-	path := pidPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
-}
-
-func removePID() {
-	os.Remove(pidPath()) //nolint:errcheck
-}
 
 func loadConfig() (*Config, error) {
 	path := configPath()
@@ -122,7 +106,7 @@ func main() {
 		Use:   "cloudscale",
 		Short: "Cloudscale mesh VPN client",
 	}
-	root.AddCommand(setupCmd(), upCmd(), downCmd(), statusCmd())
+	root.AddCommand(setupCmd(), upCmd(), deleteCmd(), statusCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -341,11 +325,6 @@ func upCmd() *cobra.Command {
 				wg.SyncPeers(peers) //nolint:errcheck
 			}
 
-			if err := writePID(); err != nil {
-				fmt.Fprintf(os.Stderr, "warn: write pid file: %v\n", err)
-			}
-			defer removePID()
-
 			fmt.Printf("cloudscale up — %s (%s)\n", cfg.NodeName, state.MeshIP)
 
 			// Send an initial heartbeat immediately so our endpoints are registered
@@ -366,15 +345,13 @@ func upCmd() *cobra.Command {
 	}
 }
 
-// cloudscale down — deregister this node and bring down the interface.
-func downCmd() *cobra.Command {
+// cloudscale delete — deregister this node, wipe local state, and tear down the interface.
+// Fresh keys and a new mesh IP will be assigned on the next cloudscale up.
+func deleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "down",
-		Short: "Disconnect from the mesh and deregister this node",
+		Use:   "delete",
+		Short: "Deregister this node and wipe local state (fresh start on next up)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Stop the running daemon if there is one.
-			stopDaemon()
-
 			// Deregister from control plane if we have state.
 			state, stateErr := loadState()
 			if stateErr == nil {
@@ -415,35 +392,6 @@ func downCmd() *cobra.Command {
 			fmt.Println("cloudscale down")
 			return nil
 		},
-	}
-}
-
-// stopDaemon sends SIGTERM to the running cloudscale up process and waits
-// up to 5 seconds for it to exit cleanly.
-func stopDaemon() {
-	data, err := os.ReadFile(pidPath())
-	if err != nil {
-		return // no pid file — nothing running
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		return // process already gone
-	}
-	fmt.Printf("sent SIGTERM to cloudscale up (pid %d)\n", pid)
-
-	// Wait up to 5 seconds for the process to exit.
-	for range 50 {
-		time.Sleep(100 * time.Millisecond)
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			break // process exited
-		}
 	}
 }
 

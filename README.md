@@ -107,15 +107,15 @@ All nodes on the same network share the same `controlURL` and `networkKey`. `nod
 sudo cloudscale setup
 
 # Connect (requires root — manages WireGuard interface)
-# Blocks in the foreground; use a service manager or screen/tmux for background use
+# Blocks in the foreground; Ctrl+C to disconnect
 sudo cloudscale up
 
 # Show mesh status and connected peers
 cloudscale status
 
-# Gracefully disconnect and deregister
-# Sends SIGTERM to the running cloudscale up process, then cleans up
-sudo cloudscale down
+# Deregister this node and wipe local state
+# Next cloudscale up will generate fresh keys and get a new mesh IP
+sudo cloudscale delete
 ```
 
 `cloudscale up` will:
@@ -123,16 +123,14 @@ sudo cloudscale down
 2. Generate a WireGuard keypair and bring up the interface
 3. Discover public/LAN endpoints via Cloudflare STUN
 4. Start a heartbeat loop (every 30s) and a WebSocket listener for live updates
-5. Write a PID file so `cloudscale down` can find and stop it cleanly
 
-`cloudscale down` will:
-1. Send SIGTERM to the running `cloudscale up` process and wait for it to exit
-2. Deregister the node from the control plane
-3. Remove the WireGuard interface and route
-4. Clean up any leftover socket files
-5. Delete local state
+`cloudscale delete` will:
+1. Deregister the node from the control plane (mesh IP freed immediately)
+2. Remove the WireGuard interface and route
+3. Clean up any leftover socket files
+4. Delete local state (keypair, nodeID, mesh IP)
 
-> **Ctrl+C vs `cloudscale down`:** Ctrl+C in the `cloudscale up` terminal disconnects immediately but does not deregister — the node stays in the control plane until its heartbeat times out (~2 min). Use `cloudscale down` for a clean exit that frees the mesh IP immediately.
+> **Ctrl+C vs `cloudscale delete`:** Ctrl+C disconnects the running `up` process but keeps your keys and registration intact — the next `cloudscale up` reconnects instantly with the same mesh IP. Use `cloudscale delete` only when you want a clean slate with fresh keys.
 
 ## Running as a service
 
