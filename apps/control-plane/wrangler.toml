@@ -13,4 +13,4 @@ class_name = "TopologyHub"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["TopologyHub"]
+new_sqlite_classes = ["TopologyHub"]

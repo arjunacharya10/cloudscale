@@ -202,19 +202,35 @@ func (c *Client) do(ctx context.Context, method, path, nodeID string, reqBody, r
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
 		var apiErr struct {
 			Error string `json:"error"`
 		}
-		json.NewDecoder(resp.Body).Decode(&apiErr) //nolint:errcheck
+		json.Unmarshal(raw, &apiErr) //nolint:errcheck
 		if apiErr.Error != "" {
 			return fmt.Errorf("api error %d: %s", resp.StatusCode, apiErr.Error)
+		}
+		preview := string(raw)
+		if len(preview) > 200 {
+			preview = preview[:200] + "…"
+		}
+		if preview != "" {
+			return fmt.Errorf("http %d: %s — %s", resp.StatusCode, resp.Status, preview)
 		}
 		return fmt.Errorf("http %d: %s", resp.StatusCode, resp.Status)
 	}
 
 	if respBody != nil {
-		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil {
-			return fmt.Errorf("decode response: %w", err)
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("read response: %w", err)
+		}
+		if err := json.Unmarshal(raw, respBody); err != nil {
+			preview := string(raw)
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			return fmt.Errorf("decode response (status %d, body: %s): %w", resp.StatusCode, preview, err)
 		}
 	}
 

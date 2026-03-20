@@ -136,15 +136,7 @@ func (m *Manager) SyncPeers(peers []PeerConfig) error {
 			allowedIPs = append(allowedIPs, *ipNet)
 		}
 
-		// Use the first resolvable endpoint.
-		var endpoint *net.UDPAddr
-		for _, ep := range p.Endpoints {
-			addr, err := net.ResolveUDPAddr("udp", ep)
-			if err == nil {
-				endpoint = addr
-				break
-			}
-		}
+		endpoint := pickEndpoint(p.Endpoints)
 
 		keepalive := 25 * time.Second
 		wgPeers = append(wgPeers, wgtypes.PeerConfig{
@@ -244,6 +236,49 @@ func darwinNewUtun(before map[string]bool) (string, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return "", fmt.Errorf("no new utun interface appeared after 2s")
+}
+
+// pickEndpoint selects the best endpoint from the list.
+// It prefers an endpoint whose IP is on a subnet we have a local interface on
+// (same-LAN peer, avoids NAT hairpin problems). Falls back to the first
+// resolvable endpoint (typically the public IP) when no same-subnet match is found.
+func pickEndpoint(endpoints []string) *net.UDPAddr {
+	localNets := localInterfaceNets()
+	var fallback *net.UDPAddr
+	for _, ep := range endpoints {
+		addr, err := net.ResolveUDPAddr("udp", ep)
+		if err != nil {
+			continue
+		}
+		if fallback == nil {
+			fallback = addr
+		}
+		for _, localNet := range localNets {
+			if localNet.Contains(addr.IP) {
+				return addr // same-LAN endpoint, prefer it
+			}
+		}
+	}
+	return fallback
+}
+
+// localInterfaceNets returns the IP networks for all non-loopback, non-mesh interfaces.
+func localInterfaceNets() []*net.IPNet {
+	_, meshNet, _ := net.ParseCIDR(meshCIDR)
+	ifaces, _ := net.Interfaces()
+	var nets []*net.IPNet
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !meshNet.Contains(ipnet.IP) {
+				nets = append(nets, ipnet)
+			}
+		}
+	}
+	return nets
 }
 
 func run(name string, args ...string) error {
